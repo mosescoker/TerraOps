@@ -1,0 +1,11 @@
+settings.json
+settings.tmp
+workspace/
+__pycache__/
+*.pyc
+*.tfstate*
+*.tfplan
+.terraform/
+.env
+*.pem
+*.key
