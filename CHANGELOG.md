@@ -16,3 +16,6 @@
 ## v0.3.7
 - Categorized local tool inventory, PATH refresh, optional version checks, executable paths and filters.
 - Dedicated Tools navigation and regression tests.
+
+## 0.3.8
+- Allowlisted WinGet/Homebrew tool installation and upgrade previews, optional execution, job isolation and tests.

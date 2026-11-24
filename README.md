@@ -1,4 +1,8 @@
-# TerraOps Console — v0.3.4 Rebuilt
+# TerraOps Console — v0.3.6
+
+## Existing workspace picker
+Choose a workspace from the searchable selector on any page. Refresh after creating folders outside TerraOps. Only direct child directories of the configured workspace root with supported names are listed. Switching clears the editor buffer after confirmation and is blocked while the tracked job runs. No workspace is automatically selected at startup.
+
 
 A clean consolidated release of the original v0.1 portable application architecture with the v0.3.4 feature set. Python standard library, static HTML/CSS/JavaScript, no CDN, no database and no required third-party Python packages for the console.
 
@@ -43,3 +47,11 @@ This build passed Python and JS syntax checks, local HTTP API regression checks 
 
 ## v0.3.5 — Git authentication
 Environments has separate GitHub and GitLab authentication choices: existing Git configuration, Git Credential Manager (`manager`, installed and authenticated separately), or a session-only username/PAT. Save the HTTPS repository URL, save authentication, then test repository access (`git ls-remote`). An exit code of zero confirms read access, not write permission. Clone and fetch use the selected provider mode; fetch requires origin to match the configured URL. PATs are passed in child process environment variables to a non-persisting Git helper scoped to the exact HTTPS repository. They are not included in settings or command arguments. Git Credential Manager and existing helpers may persist credentials independently. Session clear does not revoke tokens or interrupt running jobs. Only use trusted repositories and local Git configuration; subprocess environment is not a security sandbox. No live remote or Windows tests were performed.
+
+## v0.3.7 — Tools on this machine
+Open Tools, Dashboard, Repository or Settings to view the categorized tool inventory. Refresh detection rescans the server PATH; Check installed versions explicitly runs allowlisted version commands with a four-second timeout per tool. Versions are best-effort and only version strings are returned. Other tools are detection-only. No automatic installs or cloud connectivity checks are performed. A detected executable is not evidence of working credentials, provider compatibility or an implemented execution integration. Run TerraOps in WSL to discover WSL-local Ansible tools. Restart TerraOps after changing the system PATH. Only run trusted local executables; third-party CLI version commands may have their own side effects or telemetry.
+
+## v0.3.8: Tool installation and upgrades
+Tools now previews allowlisted install/upgrade commands. Windows uses WinGet; macOS/Linux/WSL uses Homebrew if already installed. Unsupported tools remain detection-only. Terraform on Homebrew requires the HashiCorp tap to be configured separately if necessary. Package manager availability, package IDs and source agreements depend on the local installation. No package manager bootstrap, automatic elevation, bulk upgrades, license acceptance or rollback is provided.
+
+Execution is off by default. On Windows PowerShell: `$env:TERRAOPS_ENABLE_TOOL_INSTALL="1"; python server.py`. On Linux/macOS: `TERRAOPS_ENABLE_TOOL_INSTALL=1 python server.py`. Use a normal non-admin account. Select Tools, then Install or Upgrade, review the exact command and type the displayed confirmation. Without opt-in, the command is shown for manual use. Network connectivity is needed. All active jobs must finish before package changes; saved plans are discarded and new jobs blocked during package execution. Output is suppressed except for status and exit code. If an installer requires interaction or agreement acceptance, run the command in your own terminal instead. A successful exit does not guarantee PATH visibility; restart the terminal and TerraOps, refresh detection and check installed versions. Upgrade is a request to the package manager, not an update-availability check. Existing external package-manager configurations and credentials remain outside TerraOps control. Do not close the server during an installation.

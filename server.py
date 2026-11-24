@@ -1,7 +1,7 @@
 import shlex, hashlib, tempfile, time, os, json, secrets, subprocess, threading, shutil, re, sys
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-VERSION="0.3.7"
+VERSION="0.3.8"
 ROOT=Path(__file__).resolve().parent
 TOKEN=secrets.token_urlsafe(32); JOBS={}; LOCK=threading.RLock(); PROFILES={}; PORT=8765
 # Detection is separate from execution support. No installs or network probes.
@@ -45,6 +45,40 @@ def tool_inventory(versions=False):
  try:
   with ThreadPoolExecutor(max_workers=8) as pool:return list(pool.map(lambda item:inspect_tool(*item,versions=True),entries))
  finally:TOOL_SCAN_LOCK.release()
+
+# Explicit opt-in; package commands are server-owned, never supplied by the browser.
+PACKAGE_ENABLED=os.environ.get('TERRAOPS_ENABLE_TOOL_INSTALL')=='1'
+PACKAGES={
+ 'winget':{'git':'Git.Git','terraform':'Hashicorp.Terraform','kubectl':'Kubernetes.kubectl','helm':'Helm.Helm','pwsh':'Microsoft.PowerShell','code':'Microsoft.VisualStudioCode','gh':'GitHub.cli','az':'Microsoft.AzureCLI','aws':'Amazon.AWSCLI'},
+ 'brew':{'git':'git','terraform':'hashicorp/tap/terraform','tofu':'opentofu','terragrunt':'terragrunt','ansible':'ansible','ansible-lint':'ansible-lint','gh':'gh','glab':'glab','kubectl':'kubernetes-cli','helm':'helm','jq':'jq','trivy':'trivy','gitleaks':'gitleaks','tflint':'tflint','packer':'packer','aws':'awscli'}}
+def package_manager():
+ name='winget' if sys.platform=='win32' else 'brew'
+ path=shutil.which(name)
+ return name,path
+
+def package_preview(tool,operation):
+ manager,path=package_manager()
+ if operation not in ('install','upgrade') or not isinstance(tool,str) or tool not in PACKAGES[manager]:raise ValueError('No approved package recipe for this tool or operation')
+ package=PACKAGES[manager][tool]
+ args=[manager,operation,'--id',package,'--exact','--source','winget','--disable-interactivity'] if manager=='winget' else [manager,operation,package]
+ return {'tool':tool,'operation':operation,'manager':manager,'package':package,'command':args,'available':bool(path),'enabled':PACKAGE_ENABLED,'confirmation':operation.upper()+' '+tool}
+
+def package_start(tool,operation,confirmation):
+ preview=package_preview(tool,operation)
+ if not PACKAGE_ENABLED:raise ValueError('Tool installation disabled; restart with TERRAOPS_ENABLE_TOOL_INSTALL=1')
+ if not preview['available']:raise ValueError('Package manager not detected')
+ if confirmation!=preview['confirmation']:raise ValueError('Typed confirmation required')
+ with LOCK:
+  if ACTIVE:raise ValueError('Wait for all jobs to finish before changing tools')
+  if operation=='upgrade' and not tool_path(tool):raise ValueError('Tool not detected; use install or verify manually')
+  if operation=='install' and tool_path(tool):raise ValueError('Tool already detected; use upgrade')
+  # Any existing plan may rely on a binary that is about to change.
+  for key in list(PLANS):invalidate(Path(key))
+  manager,path=package_manager()
+  env={k:v for k,v in os.environ.items() if k.upper() in {'PATH','PATHEXT','SYSTEMROOT','WINDIR','COMSPEC','HOME','USERPROFILE','TEMP','TMP','LOCALAPPDATA','APPDATA','PROGRAMFILES','PROGRAMFILES(X86)','PROGRAMDATA','LANG','LC_ALL','USER','LOGNAME','SHELL','HOMEDRIVE','HOMEPATH','XDG_CONFIG_HOME','XDG_CACHE_HOME'}}
+  env.update({'HOMEBREW_NO_ANALYTICS':'1','HOMEBREW_NO_ENV_HINTS':'1','NONINTERACTIVE':'1'})
+  command=[path,*preview['command'][1:]]
+  return run_job(command,ROOT,env,package=True)
 
 CONFIG=ROOT/'settings.json'
 def linklike(p):
@@ -161,12 +195,12 @@ def env_digest(env):
 def invalidate(p):
  old=PLANS.pop(str(p),None)
  if old: Path(old['path']).unlink(missing_ok=True)
-def run_job(cmd,cwd,env=None,plan=None,consume=None):
+def run_job(cmd,cwd,env=None,plan=None,consume=None,package=False):
  if not shutil.which(cmd[0]): raise ValueError(cmd[0]+' is not installed')
  key=str(cwd); j=secrets.token_hex(8)
  with LOCK:
-  if key in ACTIVE: raise ValueError('Workspace already has a running job')
-  ACTIVE[key]=j; JOBS[j]={'status':'running','output':'Job started. Sensitive raw output is withheld.\n','code':None,'action':next((x for x in cmd[1:] if x in ('clone','fetch','ls-remote')),cmd[1]),'workspace':cwd.name,'workspacePath':str(cwd),'started':time.time()}
+  if key in ACTIVE or any(JOBS.get(j,{}).get('package') for j in ACTIVE.values()): raise ValueError('Workspace or package manager busy')
+  ACTIVE[key]=j; JOBS[j]={'status':'running','output':'Job started. Sensitive raw output is withheld.\n','code':None,'action':next((x for x in cmd[1:] if x in ('clone','fetch','ls-remote')),cmd[1]),'workspace':cwd.name,'workspacePath':str(cwd),'started':time.time(),'package':package}
  def worker():
   code=-1; proc=None; summaries=[]
   try:
@@ -287,7 +321,7 @@ class Handler(BaseHTTPRequestHandler):
   if path=='/api/session': return self.send({'version':VERSION,'token':TOKEN,'tools':{t:bool(tool_path(t)) for t in TOOLS},'catalog':CATALOG,'profileKeys':PROFILE_KEYS,'privateProviders':list(PRIVATE_PROFILE_KEYS),'profileNotes':PROFILE_NOTES,'localMutations':LOCAL_MUTATIONS,'workspaceRoot':str(WORK),'workspaceRootLocked':bool(os.environ.get('TERRAOPS_WORKSPACE_ROOT')),'gitRepositories':git_settings(),'gitAuth':git_auth_status()})
   if path in ('/api/tools','/api/tools?versions=1'):
    if self.headers.get('X-Token')!=TOKEN: return self.send({'error':'Forbidden'},403)
-   try:return self.send({'tools':tool_inventory(path.endswith('=1')),'platform':sys.platform})
+   try:return self.send({'tools':tool_inventory(path.endswith('=1')),'platform':sys.platform,'packageManager':package_manager()[0],'packageManagerAvailable':bool(package_manager()[1]),'packageEnabled':PACKAGE_ENABLED,'packages':PACKAGES[package_manager()[0]]})
    except ValueError as e:return self.send({'error':str(e)},409)
   if path=='/api/workspaces':
    if self.headers.get('X-Token')!=TOKEN: return self.send({'error':'Forbidden'},403)
@@ -309,6 +343,9 @@ class Handler(BaseHTTPRequestHandler):
   except PermissionError: self.send({'error':'Access denied to local directory'},403)
   except Exception as e: self.send({'error':str(e) if isinstance(e,ValueError) else 'Invalid request'},400)
  def process_action(self,a,d):
+   if a=='package_preview':return self.send(package_preview(d['tool'],d['operation']))
+   if a=='package_start':return self.send({'job':package_start(d['tool'],d['operation'],d.get('confirmation'))})
+   if any(JOBS.get(j,{}).get('package') for j in ACTIVE.values()) and a not in ('history','workspace_list','workspace_info','workspace_root','profiles','git_settings','template'):raise ValueError('Package manager running; wait for completion')
    if a=='git_auth_save': return self.send(set_git_auth(d['provider'],d['mode'],d.get('username',''),d.get('pat','')))
    if a=='git_auth_clear':
     if d['provider'] not in GIT_HOSTS: raise ValueError('Invalid Git provider')
@@ -342,7 +379,7 @@ class Handler(BaseHTTPRequestHandler):
    if a=='cancel':
     with LOCK:
      j=d['job']; job=JOBS.get(j)
-     if not job or job['status']!='running' or job['action'] in ('apply','-i'): raise ValueError('Only running non-apply jobs can be cancelled')
+     if not job or job['status']!='running' or job.get('package') or job['action'] in ('apply','-i'): raise ValueError('Only running non-apply jobs can be cancelled')
      CANCELLED.add(j)
      if j in PROCESSES: PROCESSES[j].terminate()
     return self.send({'message':'Cancellation requested; child processes may require manual cleanup.'})
